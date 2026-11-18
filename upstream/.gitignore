@@ -1,0 +1,147 @@
+# ═════════════════════════════════════════════════════════════════
+# 凭据与私密数据 —— 一律不入库
+#
+# 🔴 规则按**家族**写，绝不枚举后缀。快照后缀是不收敛的
+#    （`.bak` / `.bak-<描述>` / `.old` / `.save` / `.tmp` / `~`），
+#    枚举永远补不完。
+#
+#    教训（2026-09-18）：原来只写了 `.env` / `.env.local` / `.env.*.local`
+#    三条，于是改配置前顺手做的备份 `.env.bak-20260918-110124`
+#    （内含真实 IR_WORKER_ADMIN_TOKEN）**完全没被忽略** ——
+#    `git check-ignore` 一验就现形。
+#
+# 🔴 配套：`tools/gates/check_leaks.py` 是同一套规则的**第二层**。
+#    两层必须同时拦，只改一层会漂移成"一个放行一个拦截"。
+#    提交前跑 `python tools/gates/check_leaks.py`（pre-commit 钩子已自动挂）。
+#
+# ⚠ 钩子**不随仓库分发**，而且它们内部写的是**脚本路径的绝对定位** ——
+#   所以每次移动闸门脚本的位置（如 2026-09-19 的 tools/ → tools/gates/），
+#   都必须重跑 `python tools/gates/install_hooks.py` 覆盖已装的钩子。
+#   实测踩过：只改了脚本里的模板、没重装钩子 ⇒ 钩子仍指向旧路径 ⇒
+#   `python: can't open file ... tools/check_leaks.py` ⇒ 钩子每次都 exit 1，
+#   而报错文案却是"提交被泄漏闸门拦下（见上方命中项）"——
+#   上方根本没有命中项。**闸门看起来在工作，实际早已失效。**
+# ═════════════════════════════════════════════════════════════════
+
+
+# ── 1. 环境变量 —— 本项目**唯一**的凭据存放点 ─────────────────────
+.env
+.env.*
+# 🔴 例外行不能省：上面那条会把模板一起吃掉。
+#    而"误伤"是静默的 —— 不入库、不报错，等你发现时别人 clone 下来跑不起来。
+!/.env.example
+
+
+# ── 2. 任意快照 / 备份后缀（家族规则，不枚举）──────────────────────
+*.bak*
+*.old
+*.orig
+*.save*
+*.tmp*
+*.copy*
+*.backup*
+*.swp
+*.swo
+*~
+
+
+# ── 3. 运行产物 —— 结果里含明文账号 / 密码 / JWT / API Key ─────────
+# 🔴 台账目录（2026-09-20 起，见 src/ledger.py 的模块 docstring）：
+#      ledger/runs/<日期>/results-<时间戳>.json   ← **读源**（合并后的全量）
+#      ledger/latest.json                         ← 本批结果（⚠ 不是读源）
+#    里面是**明文账号 / 密码 / JWT / API Key**，整个目录排除。
+#    刻意不靠下面的 `*.json` 兜底：那条是通配，哪天有人往目录里放个
+#    `README.md` / `notes.md` 就漏了 —— 而"按家族写规则"是本文件的铁律。
+ledger/
+# 老布局的仓库根结果文件。**已退役**（`run.py --out` 默认不再是它），
+# 但本机可能还留着历史文件，规则继续保留 —— 删规则 = 让一份含凭据的旧文件
+# 变成未忽略文件。
+results.json
+keys.json
+accounts.json
+*.json
+*.jsonl
+*.csv
+
+# 🔴 例外：测试用的**脱敏样本台账**。
+#    上面 `*.json` 是一条无差别规则，会把它一起挡住 —— 而它是**必须入库**的：
+#    `results.json` 含凭据、不入库 ⇒ CI 上读不到 ⇒ 依赖它的用例全部失效
+#    （2026-09-19 CI 第二次变红就是这么来的）。样本是那份数据的**形状替身**，
+#    值全编造、email 只用 RFC 2606 保留域 `example.com`，
+#    由 `tests/test_ledger_sample.py` 逐条钉住（含"不许出现真凭据形态的串"）。
+#
+#    ⚠ 这条例外只放行这一个文件，不放行整个目录 —— 别写成 `!tests/fixtures/*`。
+!tests/fixtures/ledger_sample.json
+
+# 🔴 2026-09-20（B5）第二份夹具，同一个坑**再踩一次**：
+#    `report_render_golden.json`（报告层 stdout 金标准）生成完，
+#    `git status` **根本不显示它**（被上面的 `*.json` 吞了）——
+#    本地 pytest 全绿，而新克隆的仓库会 FileNotFoundError。
+#    ⇒ 真正的失效点不是"忘了加例外"，而是**例外必须逐文件手写**这件事本身。
+#      已补 `tests/test_repo_hygiene.py` 把这个不变量变成可执行断言：
+#      `tests/fixtures/` 下每个文件都必须 `git check-ignore` 返回"未被忽略"。
+!tests/fixtures/report_render_golden.json
+
+# 过程截图（`--shot` 产物）
+*.png
+*.jpg
+*.jpeg
+
+
+# ── 4. 代理清单 —— 内含 `host:port:user:pass` ─────────────────────
+# `tools/probes/probe_proxy.py --file` 与槽位池都吃这两种名字。
+# 默认位置在 .workbuddy-ai/ 下（已被 §7 覆盖），这里兜底防"换个目录就漏"。
+proxies.txt*
+slots.txt*
+*_proxies.txt*
+
+# mihomo 槽位配置：每个节点条目都带账密。
+# 正常路径是 .workbuddy-ai/proxypool/config.yaml（§7 已覆盖），这里兜底。
+mihomo*.yaml*
+config.yaml*
+
+
+# ── 5. 证书 / 私钥 ───────────────────────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+
+# ── 6. 日志 —— 批次日志里含邮箱 / 账号 / 出口 IP ───────────────────
+*.log
+*.log.*
+
+
+# ── 7. 工作区私有数据 ────────────────────────────────────────────
+# 约定（见 docs/security-conventions.md「目录规范」）：
+#   .workbuddy-ai/state/    运行态计数（配额台账）
+#   .workbuddy-ai/tmp/      临时文件、批次日志
+#   .workbuddy-ai/exports/  探测报告、Key 导出
+#   .workbuddy-ai/proxypool/  mihomo 槽位配置 + slots.txt（含账密）
+#   .workbuddy-ai/memory/   开发过程记录
+# 这里面的东西**全部**是本地私密数据，不随源码发布。
+.workbuddy-ai/
+
+
+# ── 8. Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+
+# ── 9. 编辑器 / 系统 ─────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

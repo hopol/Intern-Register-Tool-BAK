@@ -1,0 +1,80 @@
+name: ci
+
+# 与 `secret-scan.yml` **刻意分开**，不要合并：
+#   - secret-scan 必须能在"没装 pytest"的环境里跑（它只依赖 stdlib），
+#     而且它需要 `fetch-depth: 0`（要扫全部 git 历史）。
+#   - 本工作流的两个 job 需要 ruff / pytest。
+# 混在一起会给泄漏闸门多加一个"因为 pytest 装不上而失败"的失败模式 ——
+# 而闸门失败的代价是**误以为仓库干净**。
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # 版本范围与 pyproject.toml 的 dev 依赖保持一致。
+      - name: 安装 ruff
+        run: pip install "ruff>=0.16,<0.17"
+
+      - name: ruff check
+        run: python -m ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 🔴 这里曾经只装 `pytest`，注释还写着"测试链上零第三方依赖" ——
+      #    **那是错的假设，而且它把 CI 连续红了 3 次**（本地全绿，因为本地装过）。
+      #
+      #    实测依赖链（`python .workbuddy-ai/tmp/scan_test_deps.py`）：
+      #      tests/test_error_kind.py  → from src import pipeline
+      #        → src/pipeline.py:45    → from .discovery import DiscoveryClient
+      #          → src/discovery.py:37 → import requests        ← 缺
+      #        → src/sso.py            → src/crypto_rsa
+      #          → cryptography.hazmat.primitives               ← 缺
+      #
+      #    `playwright` **确实**不在收集路径上（`src/browser/session.py` 里是
+      #    函数体内的延迟 import），所以不装 —— 这一半的原假设是对的。
+      #
+      #    ⚠ 不要图省事写成 `pip install -r requirements.txt`：那会把 playwright
+      #      也拉进来。测试**真的**不需要它，这个边界要留住。
+      #      但"哪些是必需的"不能再靠注释里的假设 —— 见
+      #      `tests/test_dependency_surface.py`，它把这条假设变成了**可执行断言**：
+      #      测试链上一旦多出新的第三方包，本地跑测试就会红，不用等 CI。
+      #
+      #    版本范围与 `pyproject.toml` 的 `dependencies` / `dev` 保持一致。
+      #    🔴 这份清单有**三处**必须同步，改一处就要改全：
+      #        1. 这里
+      #        2. `tests/test_dependency_surface.py` 的 `ALLOWED`
+      #        3. `pyproject.toml` 的 `dependencies` /
+      #           `optional-dependencies.dev`
+      - name: 安装测试依赖
+        run: pip install "pytest>=8" "requests>=2.31" "cryptography>=42.0"
+
+      # ⚠ **不要在这里加 `-q`**：`pyproject.toml` 的 `addopts` 已经有一个 `-q`，
+      #    两个叠成 `-qq` 会把**汇总行吞掉** —— CI 日志里只剩一串点，
+      #    看不到 `233 passed, 6 skipped in 5.04s`。实测确认过。
+      #    需要调详细程度就改 `pyproject.toml` 的 `addopts`（一处生效）。
+      - name: pytest
+        run: python -m pytest
